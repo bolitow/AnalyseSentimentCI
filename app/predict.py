@@ -1,28 +1,25 @@
 # app/predict.py
+import joblib
 import numpy as np
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.preprocessing.text import tokenizer_from_json
-import json
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 
 class SentimentPredictor:
     def __init__(self):
-        # Chargement du modèle local
-        self.model = load_model('app/model')
-
-        # Chargement du tokenizer
-        with open('app/model/tokenizer.json') as f:
-            self.tokenizer = tokenizer_from_json(f.read())
+        # Chargement du modèle TF-IDF + Régression Logistique
+        self.model = joblib.load('app/model/logistic_regression_model.pkl')
+        self.vectorizer = joblib.load('app/model/tfidf_vectorizer.pkl')
 
     def preprocess(self, text):
-        sequence = self.tokenizer.texts_to_sequences([text])
-        return pad_sequences(sequence, maxlen=100)
+        # Transformation TF-IDF
+        return self.vectorizer.transform([text])
 
     def predict(self, text):
+        # Prétraitement et prédiction
         processed = self.preprocess(text)
-        prediction = self.model.predict(processed)[0]
+        probabilities = self.model.predict_proba(processed)[0]
+
         return {
-            "negative": float(prediction[0]),
-            "positive": float(prediction[1])
+            "negative": float(probabilities[0]),
+            "positive": float(probabilities[1])
         }
