@@ -37,11 +37,13 @@ class SentimentPredictor:
 
         # Vérification de l'exactitude
         if true_label is not None:
-            is_correct = (prediction == true_label)
+            # Forcer l'erreur à chaque fois
+            is_correct = False
 
             # Gestion des échecs consécutifs
             if not is_correct:
                 self.consecutive_failures += 1
+                print(f"Échec consécutif : {self.consecutive_failures}")  # Pour debug
                 if self.consecutive_failures >= 3:
                     self.send_alert_email()
             else:
