@@ -8,7 +8,7 @@ text_input = st.text_area("Entrez un texte")
 
 if st.button("Prédire"):
     # Appel à l'API backend sur le port 5000
-    response = requests.post("http://127.0.0.1:5000/predict", json={"text": text_input})
+    response = requests.post("https://projet-analyse-tweet-7c7caa373be8.herokuapp.com/predict", json={"text": text_input})
 
     if response.status_code == 200:
         result = response.json()
