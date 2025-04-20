@@ -1,8 +1,8 @@
 # front.py
-import streamlit as st
-import requests
-import time
 import os
+
+import requests
+import streamlit as st
 from dotenv import load_dotenv
 
 # Load environment variables

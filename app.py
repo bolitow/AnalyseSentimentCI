@@ -1,12 +1,14 @@
 # api.py
+import logging
 import os
 import time
-import logging
-from flask import Flask, request, jsonify, Response
-from flask_cors import CORS
-from app.predict import SentimentPredictor
-from dotenv import load_dotenv
 import traceback
+
+from dotenv import load_dotenv
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+
+from app.predict import SentimentPredictor
 
 # Configure logging
 logging.basicConfig(

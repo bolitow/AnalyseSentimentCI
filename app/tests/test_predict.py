@@ -1,8 +1,8 @@
-from app.predict import SentimentPredictor
 import unittest
 from unittest.mock import patch, MagicMock
-import os
-import pytest
+
+from app.predict import SentimentPredictor
+
 
 class TestPredict(unittest.TestCase):
     def setUp(self):
