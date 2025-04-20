@@ -11,8 +11,24 @@ load_dotenv()
 class SentimentPredictor:
     def __init__(self):
         # Chargement des modèles
+        # Get the absolute path to the project root directory
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        # Get model paths from environment variables or use default paths
         model_path = os.getenv('MODEL_PATH', 'app/model/logistic_regression_model.pkl')
         vectorizer_path = os.getenv('VECTORIZER_PATH', 'app/model/tfidf_vectorizer.pkl')
+
+        # Convert to absolute paths if they are relative
+        if not os.path.isabs(model_path):
+            model_path = os.path.join(project_root, model_path)
+        if not os.path.isabs(vectorizer_path):
+            vectorizer_path = os.path.join(project_root, vectorizer_path)
+
+        # Check if files exist
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found: {model_path}")
+        if not os.path.exists(vectorizer_path):
+            raise FileNotFoundError(f"Vectorizer file not found: {vectorizer_path}")
 
         self.model = joblib.load(model_path)
         self.vectorizer = joblib.load(vectorizer_path)
@@ -30,15 +46,14 @@ class SentimentPredictor:
     def preprocess(self, text):
         return self.vectorizer.transform([text])
 
-    def predict(self, text, true_label=0):
+    def predict(self, text, true_label=None):
         processed = self.preprocess(text)
         probabilities = self.model.predict_proba(processed)[0]
         prediction = self.model.predict(processed)[0]
 
-        # Vérification de l'exactitude
+        # Vérification de l'exactitude seulement si true_label est fourni
         if true_label is not None:
-            # Forcer l'erreur à chaque fois
-            is_correct = False
+            is_correct = prediction == true_label
 
             # Gestion des échecs consécutifs
             if not is_correct:
