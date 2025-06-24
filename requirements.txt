@@ -7,6 +7,7 @@ Flask~=3.1.0
 flask-cors~=4.0.0
 python-dotenv~=1.1.0
 streamlit~=1.44.0
-opencensus-ext-azure
-opencensus-ext-flask
-azure-mgmt-monitor
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-instrumentation-flask
+azure-monitor-opentelemetry-exporter
