@@ -9,4 +9,4 @@ python-dotenv~=1.1.0
 streamlit~=1.44.0
 opencensus-ext-azure
 opencensus-ext-flask
-azure-monitor
+azure-mgmt-monitor
