@@ -59,10 +59,21 @@ class SentimentPredictor:
         # Stockage des prédictions récentes pour les décisions accept/reject
         self.recent_predictions = {}
 
+        # Initialiser Azure Monitor si disponible
+        try:
+            from app.azure_monitor import AzureMonitor
+            self.azure_monitor = AzureMonitor()
+            logger.info(f"Azure Monitor initialized: {self.azure_monitor.enabled}")
+        except ImportError:
+            logger.warning("Azure Monitor not available")
+            self.azure_monitor = None
+
     def preprocess(self, text):
         return self.vectorizer.transform([text])
 
     def predict(self, text, true_label=None):
+        start_time = time.time()
+
         processed = self.preprocess(text)
         probabilities = self.model.predict_proba(processed)[0]
         prediction = self.model.predict(processed)[0]
@@ -91,6 +102,15 @@ class SentimentPredictor:
             "prediction_id": prediction_id
         }
 
+        # Log prediction to Azure Monitor
+        processing_time = (time.time() - start_time) * 1000  # Convert to ms
+        if self.azure_monitor and self.azure_monitor.enabled:
+            try:
+                self.azure_monitor.log_prediction(text, result, prediction_id)
+                self.azure_monitor.log_performance("prediction", processing_time)
+            except Exception as e:
+                logger.error(f"Failed to log to Azure Monitor: {e}")
+
         return result
 
     def handle_decision(self, prediction_id, decision):
@@ -116,6 +136,20 @@ class SentimentPredictor:
 
             logger.warning(f"Rejection received. Consecutive failures: {self.consecutive_failures}")
             logger.info(f"Recent rejections: {len(self.rejection_history)} in history")
+
+            # Log rejection to Azure Monitor
+            if self.azure_monitor and self.azure_monitor.enabled:
+                try:
+                    # Reconstruct result format for Azure Monitor
+                    result = {
+                        "negative": float(prediction_data["probabilities"][0]),
+                        "positive": float(prediction_data["probabilities"][1])
+                    }
+                    # Get original text (truncated version stored)
+                    text = prediction_data["text"]
+                    self.azure_monitor.log_rejection(text, result, prediction_id)
+                except Exception as e:
+                    logger.error(f"Failed to log rejection to Azure Monitor: {e}")
 
             if self.consecutive_failures >= 3:
                 logger.error("ALERT: 3 consecutive rejections - sending email alert")
