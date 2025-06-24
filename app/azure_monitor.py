@@ -4,22 +4,23 @@ from datetime import datetime, timedelta
 from typing import Dict, Any
 from collections import deque
 
-from opencensus.ext.azure.log_exporter import AzureLogHandler
-from opencensus.ext.azure import metrics_exporter
-from opencensus.stats import aggregation as aggregation_module
-from opencensus.stats import measure as measure_module
-from opencensus.stats import stats as stats_module
-from opencensus.stats import view as view_module
-from opencensus.tags import tag_map as tag_map_module
-from opencensus.ext.azure.trace_exporter import AzureExporter
-from opencensus.trace.samplers import ProbabilitySampler
-from opencensus.trace.tracer import Tracer
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.resources import Resource
+from azure.monitor.opentelemetry.exporter import (
+    AzureMonitorLogExporter,
+    AzureMonitorMetricExporter,
+    AzureMonitorTraceExporter,
+)
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 logger = logging.getLogger(__name__)
 
 
 class AzureMonitor:
-    """Gestionnaire pour Azure Application Insights"""
+    """Gestionnaire pour Azure Application Insights avec OpenTelemetry"""
 
     def __init__(self, connection_string: str = None):
         """
@@ -37,60 +38,67 @@ class AzureMonitor:
 
         self.enabled = True
 
-        # Initialiser le logger Azure
+        # Configure resource
+        resource = Resource.create({
+            "service.name": "sentiment-analysis-api",
+            "service.version": os.getenv('APP_VERSION', '1.0.0'),
+        })
+
+        # Configure metrics
+        metric_reader = PeriodicExportingMetricReader(
+            exporter=AzureMonitorMetricExporter(connection_string=self.connection_string),
+            export_interval_millis=60000,  # Export every 60 seconds
+        )
+
+        metrics.set_meter_provider(MeterProvider(
+            resource=resource,
+            metric_readers=[metric_reader]
+        ))
+
+        # Get meter
+        self.meter = metrics.get_meter("sentiment_analysis")
+
+        # Create custom metrics
+        self.prediction_counter = self.meter.create_counter(
+            name="prediction_count",
+            description="Number of predictions made",
+            unit="predictions"
+        )
+
+        self.rejection_counter = self.meter.create_counter(
+            name="rejection_count",
+            description="Number of rejected predictions",
+            unit="rejections"
+        )
+
+        self.processing_time_histogram = self.meter.create_histogram(
+            name="processing_time",
+            description="Processing time for predictions",
+            unit="ms"
+        )
+
+        # Configure tracing
+        trace.set_tracer_provider(TracerProvider(resource=resource))
+        tracer_provider = trace.get_tracer_provider()
+        tracer_provider.add_span_processor(
+            BatchSpanProcessor(
+                AzureMonitorTraceExporter(connection_string=self.connection_string)
+            )
+        )
+        self.tracer = trace.get_tracer("sentiment_analysis")
+
+        # Configure logging
         self.azure_logger = logging.getLogger('azure_telemetry')
         self.azure_logger.setLevel(logging.INFO)
-        self.azure_logger.addHandler(AzureLogHandler(connection_string=self.connection_string))
-
-        # Initialiser le tracer pour les traces distribuées
-        self.tracer = Tracer(
-            exporter=AzureExporter(connection_string=self.connection_string),
-            sampler=ProbabilitySampler(1.0)
+        handler = logging.StreamHandler()
+        handler.addHandler(
+            AzureMonitorLogExporter(connection_string=self.connection_string)
         )
-
-        # Initialiser les métriques
-        self.stats = stats_module.stats
-        self.view_manager = self.stats.view_manager
-
-        # Configurer l'exportateur de métriques
-        exporter = metrics_exporter.new_metrics_exporter(
-            connection_string=self.connection_string
-        )
-        self.view_manager.register_exporter(exporter)
-
-        # Créer les mesures personnalisées
-        self.prediction_count_measure = measure_module.MeasureInt(
-            "prediction_count", "Nombre de prédictions", "predictions"
-        )
-        self.rejection_count_measure = measure_module.MeasureInt(
-            "rejection_count", "Nombre de rejets", "rejections"
-        )
-
-        # Créer les vues pour les métriques
-        prediction_view = view_module.View(
-            "prediction_count_view",
-            "Nombre de prédictions par minute",
-            [],
-            self.prediction_count_measure,
-            aggregation_module.CountAggregation()
-        )
-
-        rejection_view = view_module.View(
-            "rejection_count_view",
-            "Nombre de rejets par minute",
-            [],
-            self.rejection_count_measure,
-            aggregation_module.CountAggregation()
-        )
-
-        # Enregistrer les vues
-        self.view_manager.register_view(prediction_view)
-        self.view_manager.register_view(rejection_view)
 
         # Historique des rejets pour la détection d'anomalies
-        self.rejection_history = deque(maxlen=100)  # Garde les 100 derniers rejets
+        self.rejection_history = deque(maxlen=100)
 
-        logger.info("Azure Application Insights initialized successfully")
+        logger.info("Azure Application Insights initialized successfully with OpenTelemetry")
 
     def log_prediction(self, text: str, prediction: Dict[str, float], prediction_id: str):
         """
@@ -104,26 +112,36 @@ class AzureMonitor:
         if not self.enabled:
             return
 
-        with self.tracer.span(name='log_prediction') as span:
+        with self.tracer.start_as_current_span("log_prediction") as span:
             # Enregistrer la métrique
-            mmap = self.stats.stats_recorder.new_measurement_map()
-            mmap.measure_int_put(self.prediction_count_measure, 1)
-            mmap.record()
+            self.prediction_counter.add(1, {
+                "sentiment": "positive" if prediction.get('positive', 0) > 0.5 else "negative",
+                "confidence_level": "high" if max(prediction.get('positive', 0),
+                                                  prediction.get('negative', 0)) > 0.8 else "low"
+            })
 
-            # Log personnalisé avec propriétés
-            properties = {
-                'prediction_id': prediction_id,
-                'text_length': len(text),
-                'positive_score': prediction.get('positive', 0),
-                'negative_score': prediction.get('negative', 0),
-                'predicted_sentiment': 'positive' if prediction.get('positive', 0) > 0.5 else 'negative',
-                'confidence': max(prediction.get('positive', 0), prediction.get('negative', 0))
-            }
+            # Ajouter des attributs au span
+            span.set_attributes({
+                "prediction.id": prediction_id,
+                "text.length": len(text),
+                "prediction.positive_score": prediction.get('positive', 0),
+                "prediction.negative_score": prediction.get('negative', 0),
+                "prediction.sentiment": "positive" if prediction.get('positive', 0) > 0.5 else "negative",
+                "prediction.confidence": max(prediction.get('positive', 0), prediction.get('negative', 0))
+            })
 
-            self.azure_logger.info(
+            # Log personnalisé
+            logger.info(
                 f"Prediction made: {prediction_id}",
                 extra={
-                    'custom_dimensions': properties
+                    'custom_dimensions': {
+                        'prediction_id': prediction_id,
+                        'text_length': len(text),
+                        'positive_score': prediction.get('positive', 0),
+                        'negative_score': prediction.get('negative', 0),
+                        'predicted_sentiment': 'positive' if prediction.get('positive', 0) > 0.5 else 'negative',
+                        'confidence': max(prediction.get('positive', 0), prediction.get('negative', 0))
+                    }
                 }
             )
 
@@ -139,108 +157,47 @@ class AzureMonitor:
         if not self.enabled:
             return
 
-        with self.tracer.span(name='log_rejection') as span:
-            # Enregistrer la métrique
-            mmap = self.stats.stats_recorder.new_measurement_map()
-            mmap.measure_int_put(self.rejection_count_measure, 1)
-            mmap.record()
+        with self.tracer.start_as_current_span("log_rejection") as span:
+            # Enregistrer la métrique avec attributs
+            self.rejection_counter.add(1, {
+                "predicted_sentiment": "positive" if prediction.get('positive', 0) > 0.5 else "negative",
+                "confidence_level": "high" if max(prediction.get('positive', 0),
+                                                  prediction.get('negative', 0)) > 0.8 else "low"
+            })
 
             # Ajouter à l'historique
             rejection_time = datetime.now()
             self.rejection_history.append(rejection_time)
 
-            # Propriétés détaillées pour l'analyse
-            properties = {
-                'prediction_id': prediction_id,
-                'rejected_text': text[:500],  # Limiter la taille
-                'text_length': len(text),
-                'positive_score': prediction.get('positive', 0),
-                'negative_score': prediction.get('negative', 0),
-                'predicted_sentiment': 'positive' if prediction.get('positive', 0) > 0.5 else 'negative',
-                'confidence': max(prediction.get('positive', 0), prediction.get('negative', 0)),
-                'timestamp': rejection_time.isoformat()
-            }
+            # Ajouter des attributs au span
+            span.set_attributes({
+                "rejection.prediction_id": prediction_id,
+                "rejection.text_length": len(text),
+                "rejection.positive_score": prediction.get('positive', 0),
+                "rejection.negative_score": prediction.get('negative', 0),
+                "rejection.predicted_sentiment": "positive" if prediction.get('positive', 0) > 0.5 else "negative",
+                "rejection.confidence": max(prediction.get('positive', 0), prediction.get('negative', 0))
+            })
 
             # Log d'avertissement pour les rejets
-            self.azure_logger.warning(
-                f"Prediction rejected: {prediction_id} - Text: {text[:100]}...",
+            logger.warning(
+                f"Prediction rejected: {prediction_id}",
                 extra={
-                    'custom_dimensions': properties
+                    'custom_dimensions': {
+                        'prediction_id': prediction_id,
+                        'rejected_text': text[:500],
+                        'text_length': len(text),
+                        'positive_score': prediction.get('positive', 0),
+                        'negative_score': prediction.get('negative', 0),
+                        'predicted_sentiment': 'positive' if prediction.get('positive', 0) > 0.5 else 'negative',
+                        'confidence': max(prediction.get('positive', 0), prediction.get('negative', 0)),
+                        'timestamp': rejection_time.isoformat()
+                    }
                 }
             )
 
             # Vérifier si on doit déclencher une alerte
             self._check_rejection_threshold()
-
-    def _check_rejection_threshold(self):
-        """
-        Vérifie si le seuil de rejets est dépassé (3 rejets en 5 minutes)
-        et déclenche une alerte si nécessaire
-        """
-        if not self.enabled or len(self.rejection_history) < 3:
-            return
-
-        # Obtenir l'heure actuelle et le seuil de 5 minutes
-        now = datetime.now()
-        five_minutes_ago = now - timedelta(minutes=5)
-
-        # Compter les rejets des 5 dernières minutes
-        recent_rejections = [
-            timestamp for timestamp in self.rejection_history
-            if timestamp > five_minutes_ago
-        ]
-
-        if len(recent_rejections) >= 3:
-            # Déclencher une alerte critique
-            self._trigger_alert(len(recent_rejections))
-
-    def _trigger_alert(self, rejection_count: int):
-        """
-        Déclenche une alerte dans Application Insights
-
-        Args:
-            rejection_count: Nombre de rejets dans la fenêtre de temps
-        """
-        properties = {
-            'alert_type': 'high_rejection_rate',
-            'rejection_count': rejection_count,
-            'time_window': '5_minutes',
-            'threshold': 3,
-            'timestamp': datetime.now().isoformat()
-        }
-
-        # Log critique pour déclencher les alertes Azure
-        self.azure_logger.critical(
-            f"ALERT: High rejection rate detected! {rejection_count} rejections in 5 minutes",
-            extra={
-                'custom_dimensions': properties
-            }
-        )
-
-    def log_error(self, error_message: str, error_type: str = 'general', **kwargs):
-        """
-        Enregistre une erreur dans Application Insights
-
-        Args:
-            error_message: Message d'erreur
-            error_type: Type d'erreur
-            **kwargs: Propriétés supplémentaires
-        """
-        if not self.enabled:
-            return
-
-        properties = {
-            'error_type': error_type,
-            'timestamp': datetime.now().isoformat(),
-            **kwargs
-        }
-
-        self.azure_logger.error(
-            error_message,
-            extra={
-                'custom_dimensions': properties
-            }
-        )
 
     def log_performance(self, operation: str, duration_ms: float, **kwargs):
         """
@@ -254,16 +211,82 @@ class AzureMonitor:
         if not self.enabled:
             return
 
-        properties = {
-            'operation': operation,
-            'duration_ms': duration_ms,
-            'timestamp': datetime.now().isoformat(),
-            **kwargs
-        }
+        # Enregistrer la métrique de temps de traitement
+        self.processing_time_histogram.record(duration_ms, {
+            "operation": operation
+        })
 
-        self.azure_logger.info(
-            f"Performance metric: {operation} took {duration_ms}ms",
-            extra={
-                'custom_dimensions': properties
-            }
-        )
+        with self.tracer.start_as_current_span(f"performance_{operation}") as span:
+            span.set_attributes({
+                "performance.operation": operation,
+                "performance.duration_ms": duration_ms,
+                **kwargs
+            })
+
+    def _check_rejection_threshold(self):
+        """
+        Vérifie si le seuil de rejets est dépassé (3 rejets en 5 minutes)
+        """
+        if not self.enabled or len(self.rejection_history) < 3:
+            return
+
+        now = datetime.now()
+        five_minutes_ago = now - timedelta(minutes=5)
+
+        recent_rejections = [
+            timestamp for timestamp in self.rejection_history
+            if timestamp > five_minutes_ago
+        ]
+
+        if len(recent_rejections) >= 3:
+            self._trigger_alert(len(recent_rejections))
+
+    def _trigger_alert(self, rejection_count: int):
+        """
+        Déclenche une alerte dans Application Insights
+        """
+        with self.tracer.start_as_current_span("alert_triggered") as span:
+            span.set_attributes({
+                "alert.type": "high_rejection_rate",
+                "alert.rejection_count": rejection_count,
+                "alert.time_window": "5_minutes",
+                "alert.threshold": 3
+            })
+
+            logger.critical(
+                f"ALERT: High rejection rate detected! {rejection_count} rejections in 5 minutes",
+                extra={
+                    'custom_dimensions': {
+                        'alert_type': 'high_rejection_rate',
+                        'rejection_count': rejection_count,
+                        'time_window': '5_minutes',
+                        'threshold': 3,
+                        'timestamp': datetime.now().isoformat()
+                    }
+                }
+            )
+
+    def log_error(self, error_message: str, error_type: str = 'general', **kwargs):
+        """
+        Enregistre une erreur dans Application Insights
+        """
+        if not self.enabled:
+            return
+
+        with self.tracer.start_as_current_span("error_occurred") as span:
+            span.set_attributes({
+                "error.type": error_type,
+                "error.message": error_message,
+                **kwargs
+            })
+
+            logger.error(
+                error_message,
+                extra={
+                    'custom_dimensions': {
+                        'error_type': error_type,
+                        'timestamp': datetime.now().isoformat(),
+                        **kwargs
+                    }
+                }
+            )
