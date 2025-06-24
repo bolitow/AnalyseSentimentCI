@@ -90,10 +90,13 @@ class AzureMonitor:
         # Configure logging
         self.azure_logger = logging.getLogger('azure_telemetry')
         self.azure_logger.setLevel(logging.INFO)
-        handler = logging.StreamHandler()
-        handler.addHandler(
-            AzureMonitorLogExporter(connection_string=self.connection_string)
-        )
+        # Add a stream handler for local logging
+        stream_handler = logging.StreamHandler()
+        self.azure_logger.addHandler(stream_handler)
+
+        # Create Azure Monitor exporter for logs
+        # Note: We'll use the tracer and metrics we've already set up
+        # instead of trying to use AzureMonitorLogExporter directly as a handler
 
         # Historique des rejets pour la détection d'anomalies
         self.rejection_history = deque(maxlen=100)
