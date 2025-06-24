@@ -1,267 +1,82 @@
-# api.py
-import logging
 import os
+import logging
 import time
 import traceback
-
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
-from app.predict import SentimentPredictor
-from app.azure_monitor import AzureMonitor
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# Load environment variables
-load_dotenv()
-
-import os
-from flask import Flask
 from azure.monitor.opentelemetry import configure_azure_monitor
 from opentelemetry.instrumentation.flask import FlaskInstrumentor
 
-# Configuration Azure Monitor
-if os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING'):
-    configure_azure_monitor(
-        connection_string=os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING'),
-        enable_live_metrics=True,
-    )
+from predict import SentimentPredictor
+from azure_monitor import AzureMonitor
 
+# Chargement .env
+load_dotenv()
+
+# Configuration Azure Monitor (traces, metrics, logs)
+configure_azure_monitor(
+    connection_string=os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING'),
+    enable_metrics=True,
+    enable_tracing=True,
+    enable_logs=True,
+    enable_live_metrics=True
+)
+
+# Setup Flask
 app = Flask(__name__)
-
-# Instrumentation Flask
 FlaskInstrumentor().instrument_app(app)
 
-
-# Initialize predictor and Azure Monitor
+# Initialisation modules
 predictor = SentimentPredictor()
 azure_monitor = AzureMonitor()
 
+# Logging de base
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Health check endpoint
 @app.route('/health', methods=['GET'])
-def health_check():
+def health():
     return jsonify({
         'status': 'ok',
-        'version': os.getenv('APP_VERSION', '1.0.0'),
         'monitoring': 'enabled' if azure_monitor.enabled else 'disabled'
     })
 
-
-# Prediction endpoint
 @app.route('/predict', methods=['POST'])
 def predict():
-    start_time = time.time()
-
+    start = time.time()
     try:
-        # Get and validate request data
-        data = request.get_json()
-        if not data:
-            logger.warning("No JSON data in request")
-            return jsonify({'error': 'Aucune donnée JSON fournie'}), 400
-
-        if 'text' not in data:
-            logger.warning("No 'text' field in request data")
+        data = request.get_json(force=True)
+        text = data.get('text')
+        if not text:
             return jsonify({'error': 'Champ "text" manquant'}), 400
 
-        text = data['text']
-
-        # Log request (truncate long texts for logging)
-        log_text = text[:100] + '...' if len(text) > 100 else text
-        logger.info(f"Processing prediction request: '{log_text}'")
-
-        # Make prediction
         result = predictor.predict(text)
+        duration_ms = (time.time() - start) * 1000
+        azure_monitor.log_performance('predict', duration_ms, text_length=len(text))
 
-        # Calculate processing time
-        processing_time = time.time() - start_time
-        logger.info(f"Prediction completed in {processing_time:.4f} seconds")
-
-        # Add metadata to response
-        response_data = {
-            **result,
-            'metadata': {
-                'processing_time_ms': round(processing_time * 1000),
-                'timestamp': time.time()
-            }
-        }
-
-        return jsonify(response_data)
+        return jsonify({**result, 'processing_time_ms': round(duration_ms, 2)})
 
     except Exception as e:
-        # Log the full exception with traceback
-        logger.error(f"Error processing request: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(str(e))
+        logger.debug(traceback.format_exc())
+        azure_monitor.log_error(f"Predict error: {e}", error_type='predict')
+        return jsonify({'error': str(e)}), 500
 
-        # Log to Azure Monitor
-        azure_monitor.log_error(
-            f"Prediction API error: {str(e)}",
-            error_type='api_error',
-            endpoint='/predict'
-        )
-
-        return jsonify({
-            'error': 'Une erreur est survenue lors du traitement de la demande',
-            'details': str(e)
-        }), 500
-
-
-# Decision endpoint for accept/reject
 @app.route('/decision', methods=['POST'])
 def decision():
-    start_time = time.time()
-
     try:
-        # Get and validate request data
-        data = request.get_json()
-        if not data:
-            logger.warning("No JSON data in request")
-            return jsonify({'error': 'Aucune donnée JSON fournie'}), 400
-
-        if 'prediction_id' not in data:
-            logger.warning("No 'prediction_id' field in request data")
-            return jsonify({'error': 'Champ "prediction_id" manquant'}), 400
-
-        if 'decision' not in data:
-            logger.warning("No 'decision' field in request data")
-            return jsonify({'error': 'Champ "decision" manquant'}), 400
-
-        prediction_id = data['prediction_id']
-        decision = data['decision']
-
-        # Validate decision value
-        if decision not in ['accept', 'reject']:
-            logger.warning(f"Invalid decision value: {decision}")
-            return jsonify({'error': 'Valeur de décision invalide. Utilisez "accept" ou "reject"'}), 400
-
-        # Log request
-        logger.info(f"Processing decision request: prediction_id={prediction_id}, decision={decision}")
-
-        # Handle decision
-        result = predictor.handle_decision(prediction_id, decision)
-
-        # Calculate processing time
-        processing_time = time.time() - start_time
-        logger.info(f"Decision processed in {processing_time:.4f} seconds")
-
-        # Add metadata to response
-        response_data = {
-            **result,
-            'metadata': {
-                'processing_time_ms': round(processing_time * 1000),
-                'timestamp': time.time()
-            }
-        }
-
-        return jsonify(response_data)
-
+        data = request.get_json(force=True)
+        pid = data.get('prediction_id')
+        decision = data.get('decision')
+        if decision == 'reject':
+            azure_monitor.log_rejection('', {'positive':0}, pid)
+        return jsonify({'status': 'ok'})
     except Exception as e:
-        # Log the full exception with traceback
-        logger.error(f"Error processing decision: {str(e)}")
-        logger.error(traceback.format_exc())
-
-        # Log to Azure Monitor
-        azure_monitor.log_error(
-            f"Decision API error: {str(e)}",
-            error_type='api_error',
-            endpoint='/decision'
-        )
-
-        return jsonify({
-            'error': 'Une erreur est survenue lors du traitement de la décision',
-            'details': str(e)
-        }), 500
-
-
-# Test email endpoint
-@app.route('/test-email', methods=['GET'])
-def test_email():
-    """Endpoint pour tester la configuration email"""
-    try:
-        # Log la configuration (sans le mot de passe)
-        logger.info("Testing email configuration...")
-        config_info = {
-            'smtp_server': predictor.smtp_server,
-            'smtp_port': predictor.smtp_port,
-            'email_from': predictor.email_from,
-            'email_to': predictor.email_to,
-            'password_configured': bool(predictor.email_password)
-        }
-        logger.info(f"Email config: {config_info}")
-
-        # Forcer l'envoi d'un email de test
-        predictor.consecutive_failures = 3
-        predictor.send_alert_email(is_rejection=True)
-
-        return jsonify({
-            'status': 'success',
-            'message': 'Test email sent (check logs)',
-            'config': config_info
-        })
-
-    except Exception as e:
-        logger.error(f"Test email failed: {str(e)}")
-        logger.exception("Full traceback:")
-        return jsonify({
-            'status': 'error',
-            'error': str(e),
-            'config': {
-                'smtp_server': predictor.smtp_server,
-                'email_from': predictor.email_from,
-                'email_to': predictor.email_to,
-                'password_configured': bool(predictor.email_password)
-            }
-        }), 500
-
-
-# Azure Monitor status endpoint
-@app.route('/monitoring-status', methods=['GET'])
-def monitoring_status():
-    """Endpoint pour vérifier le statut d'Azure Monitor"""
-    return jsonify({
-        'azure_monitor_enabled': azure_monitor.enabled,
-        'connection_string_configured': bool(os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING')),
-        'timestamp': time.time()
-    })
-
-
-# Error handlers
-@app.errorhandler(404)
-def not_found(e):
-    azure_monitor.log_error(f"404 error: {request.url}", error_type='404_error')
-    return jsonify({'error': 'Endpoint non trouvé'}), 404
-
-
-@app.errorhandler(405)
-def method_not_allowed(e):
-    azure_monitor.log_error(f"405 error: {request.method} {request.url}", error_type='405_error')
-    return jsonify({'error': 'Méthode non autorisée'}), 405
-
-
-@app.errorhandler(500)
-def server_error(e):
-    azure_monitor.log_error(f"500 error: {str(e)}", error_type='500_error')
-    return jsonify({'error': 'Erreur interne du serveur'}), 500
-
+        logger.error(e)
+        azure_monitor.log_error(f"Decision error: {e}", error_type='decision')
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    # Get port from environment variable or use default
-    port = int(os.environ.get('PORT', 5000))
-
-    # Log startup information
-    logger.info(f"Starting API server on port {port}")
-    logger.info(f"Azure Monitor enabled: {azure_monitor.enabled}")
-
-    # Run the app
-    app.run(
-        host='0.0.0.0',
-        port=port,
-        debug=os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    )
+    port = int(os.getenv('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=os.getenv('FLASK_DEBUG')=='True')
