@@ -6,7 +6,6 @@ import traceback
 
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
-from opencensus.ext.flask.flask_middleware import FlaskMiddleware
 from app.predict import SentimentPredictor
 from app.azure_monitor import AzureMonitor
 
