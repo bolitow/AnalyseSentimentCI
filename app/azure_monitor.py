@@ -5,6 +5,13 @@ from typing import Dict, Any
 from collections import deque
 
 from opentelemetry import metrics, trace
+from azure.monitor.opentelemetry.exporter import (
+    AzureMonitorLogExporter,
+    AzureMonitorMetricExporter,
+    AzureMonitorTraceExporter,
+)
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -13,96 +20,79 @@ class AzureMonitor:
     Client simplifié pour Application Insights via OpenTelemetry.
     Nécessite que configure_azure_monitor soit appelé en amont.
     """
+
     def __init__(self):
-        self.connection_string = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
-        if not self.connection_string:
-            logger.warning("APPLICATIONINSIGHTS_CONNECTION_STRING non configurée. Monitoring désactivé.")
+        connection_string = os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING')
+        if not connection_string:
+            logger.warning("Azure Monitor non configuré: APPLICATIONINSIGHTS_CONNECTION_STRING manquant.")
             self.enabled = False
             return
         self.enabled = True
 
-        # Récupère le meter et le tracer configurés par configure_azure_monitor
-        self.meter = metrics.get_meter("sentiment_analysis")
-        self.tracer = trace.get_tracer("sentiment_analysis")
-
-        # Création des métriques personnalisées
-        self.prediction_counter = self.meter.create_counter(
+        # Ajoute les readers/exporters si nécessaire
+        # Les providers ont déjà été configurés par configure_azure_monitor
+        # Pour s'assurer que metrics exportent, on peut ajouter ceci si besoin:
+        meter = metrics.get_meter_provider().get_meter(__name__)
+        self.prediction_counter = meter.create_counter(
             name="prediction_count",
             description="Nombre de prédictions effectuées",
             unit="1"
         )
-        self.rejection_counter = self.meter.create_counter(
+        self.rejection_counter = meter.create_counter(
             name="rejection_count",
-            description="Nombre de prédictions rejetées",
+            description="Nombre de rejets",
             unit="1"
         )
-        self.processing_time_histogram = self.meter.create_histogram(
+        self.processing_time_histogram = meter.create_histogram(
             name="processing_time",
-            description="Temps de traitement en ms",
+            description="Temps de traitement des prédictions",
             unit="ms"
         )
 
-        # Historique des rejets pour détection d'alerte
-        self.rejection_history = deque(maxlen=100)
+        # Configure le logger pour logs personnalisés
+        app_logger = logging.getLogger()
+        exporter = AzureMonitorLogExporter(connection_string=connection_string)
+        exporter.set_level(logging.INFO)
+        app_logger.addHandler(exporter)
+        logger.info("AzureMonitor initialisé")
 
-        logger.info("AzureMonitor initialisé. Métriques et traces activées.")
-
-    def log_prediction(self, text: str, prediction: Dict[str, Any], prediction_id: str) -> None:
+    def log_prediction(self, text: str, prediction: Dict[str, Any], prediction_id: str):
         if not self.enabled:
             return
-        with self.tracer.start_as_current_span("log_prediction") as span:
-            # Incrémente compteur
-            self.prediction_counter.add(1, {
-                "sentiment": "positive" if prediction.get('positive', 0) > 0.5 else "negative",
-                "confidence": round(prediction.get('positive', 0), 3)
-            })
-            # Attributs de trace
-            span.set_attributes({
-                "prediction.id": prediction_id,
-                "text.length": len(text)
-            })
+        # métrique
+        self.prediction_counter.add(1, {
+            "prediction.id": prediction_id,
+            "sentiment": 'positive' if prediction.get('positive',0)>0.5 else 'negative'
+        })
+        # span
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span("log_prediction") as span:
+            span.set_attribute("prediction.id", prediction_id)
+            span.set_attribute("text.length", len(text))
 
-    def log_rejection(self, text: str, prediction: Dict[str, Any], prediction_id: str) -> None:
+    def log_rejection(self, text: str, prediction: Dict[str, Any], prediction_id: str):
         if not self.enabled:
             return
-        with self.tracer.start_as_current_span("log_rejection") as span:
-            self.rejection_counter.add(1, {
-                "sentiment": "positive" if prediction.get('positive', 0) > 0.5 else "negative",
-                "confidence": round(prediction.get('positive', 0), 3)
-            })
-            span.set_attributes({
-                "rejection.id": prediction_id,
-                "text.length": len(text)
-            })
-            # Historique
-            now = datetime.utcnow()
-            self.rejection_history.append(now)
-            # Vérification seuil 3 rejets en 5 min
-            self._check_rejection_threshold()
+        self.rejection_counter.add(1, {
+            "prediction.id": prediction_id
+        })
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span("log_rejection") as span:
+            span.set_attribute("rejection.id", prediction_id)
 
-    def log_performance(self, operation: str, duration_ms: float, **attrs) -> None:
+    def log_performance(self, operation: str, duration_ms: float, **kwargs):
         if not self.enabled:
             return
-        # Enregistre histogramme
         self.processing_time_histogram.record(duration_ms, {"operation": operation})
-        with self.tracer.start_as_current_span(f"perf_{operation}") as span:
-            span.set_attributes({"duration_ms": duration_ms, **attrs})
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span(f"perf_{operation}") as span:
+            span.set_attribute("duration_ms", duration_ms)
 
-    def log_error(self, message: str, error_type: str = 'general', **attrs) -> None:
+    def log_error(self, message: str, error_type: str = 'general', **kwargs):
         if not self.enabled:
             return
-        with self.tracer.start_as_current_span("error_occurred") as span:
-            span.set_attributes({"error.type": error_type, **attrs})
         logger.error(message)
-
-    def _check_rejection_threshold(self) -> None:
-        if len(self.rejection_history) < 3:
-            return
-        now = datetime.utcnow()
-        window_start = now - timedelta(minutes=5)
-        recent = [t for t in self.rejection_history if t >= window_start]
-        if len(recent) >= 3:
-            # Trace event d'alerte
-            with self.tracer.start_as_current_span("alert_rejections") as span:
-                span.set_attributes({"count": len(recent)})
-            logger.critical(f"ALERTE: {len(recent)} rejets en 5 minutes")
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span("log_error") as span:
+            span.set_attribute("error.type", error_type)
+            span.set_attribute("error.message", message)
