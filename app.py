@@ -6,9 +6,7 @@ import traceback
 
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 from opencensus.ext.flask.flask_middleware import FlaskMiddleware
-
 from app.predict import SentimentPredictor
 from app.azure_monitor import AzureMonitor
 
@@ -25,20 +23,23 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Initialize Flask app
-app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+import os
+from flask import Flask
+from azure.monitor.opentelemetry import configure_azure_monitor
+from opentelemetry.instrumentation.flask import FlaskInstrumentor
 
-# Initialize Azure Application Insights for Flask
-connection_string = os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING')
-if connection_string:
-    middleware = FlaskMiddleware(
-        app,
-        connection_string=connection_string
+# Configuration Azure Monitor
+if os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING'):
+    configure_azure_monitor(
+        connection_string=os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING'),
+        enable_live_metrics=True,
     )
-    logger.info("Azure Application Insights middleware initialized")
-else:
-    logger.warning("Azure Application Insights connection string not found")
+
+app = Flask(__name__)
+
+# Instrumentation Flask
+FlaskInstrumentor().instrument_app(app)
+
 
 # Initialize predictor and Azure Monitor
 predictor = SentimentPredictor()
