@@ -147,6 +147,50 @@ def decision():
             'details': str(e)
         }), 500
 
+
+# Ajoutez cet endpoint dans votre app.py après les autres endpoints
+
+# Test email endpoint
+@app.route('/test-email', methods=['GET'])
+def test_email():
+    """Endpoint pour tester la configuration email"""
+    try:
+        # Log la configuration (sans le mot de passe)
+        logger.info("Testing email configuration...")
+        config_info = {
+            'smtp_server': predictor.smtp_server,
+            'smtp_port': predictor.smtp_port,
+            'email_from': predictor.email_from,
+            'email_to': predictor.email_to,
+            'password_configured': bool(predictor.email_password)
+        }
+        logger.info(f"Email config: {config_info}")
+
+        # Forcer l'envoi d'un email de test
+        predictor.consecutive_failures = 3
+        predictor.send_alert_email(is_rejection=True)
+
+        return jsonify({
+            'status': 'success',
+            'message': 'Test email sent (check logs)',
+            'config': config_info
+        })
+
+    except Exception as e:
+        logger.error(f"Test email failed: {str(e)}")
+        logger.exception("Full traceback:")
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'config': {
+                'smtp_server': predictor.smtp_server,
+                'email_from': predictor.email_from,
+                'email_to': predictor.email_to,
+                'password_configured': bool(predictor.email_password)
+            }
+        }), 500
+
+
 # Error handlers
 @app.errorhandler(404)
 def not_found(e):
