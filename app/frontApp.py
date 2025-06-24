@@ -10,11 +10,11 @@ load_dotenv()
 
 # Configuration
 API_URL = os.getenv('API_URL', 'https://projet-analyse-tweet-7c7caa373be8.herokuapp.com/predict')
+DECISION_URL = os.getenv('DECISION_URL', 'https://projet-analyse-tweet-7c7caa373be8.herokuapp.com/decision')
 
 # Page configuration
 st.set_page_config(
     page_title="Analyse de Sentiment",
-    page_icon="😊",
     layout="centered",
     initial_sidebar_state="expanded"
 )
@@ -60,28 +60,6 @@ st.markdown("""
 # Header
 st.markdown("<h1 class='main-header'>Analyse de Sentiment</h1>", unsafe_allow_html=True)
 
-# Sidebar with information
-with st.sidebar:
-    st.header("À propos")
-    st.info(
-        """
-        Cette application analyse le sentiment d'un texte et détermine s'il est positif ou négatif.
-
-        Entrez simplement votre texte et cliquez sur 'Analyser' pour obtenir une prédiction.
-        """
-    )
-
-    st.header("Exemples")
-    st.markdown("""
-    **Textes positifs:**
-    - "J'adore ce produit, il est fantastique !"
-    - "Excellente expérience, je recommande vivement."
-
-    **Textes négatifs:**
-    - "Je suis très déçu par ce service."
-    - "Ce produit ne fonctionne pas du tout comme prévu."
-    """)
-
 # Main content
 text_input = st.text_area(
     "Entrez un texte à analyser",
@@ -95,12 +73,12 @@ with col1:
     if st.button("Exemple positif"):
         text_input = "J'adore ce produit, il est fantastique ! Je le recommande vivement à tous mes amis."
         st.session_state.text_input = text_input
-        st.experimental_rerun()
+        st.experimental_user()
 with col2:
     if st.button("Exemple négatif"):
         text_input = "Je suis très déçu par ce service. Le produit ne fonctionne pas comme prévu et le support client est inexistant."
         st.session_state.text_input = text_input
-        st.experimental_rerun()
+        st.experimental_user()
 
 # Prediction button
 if st.button("Analyser le sentiment", type="primary"):
@@ -110,7 +88,7 @@ if st.button("Analyser le sentiment", type="primary"):
         with st.spinner("Analyse en cours..."):
             try:
                 # Call API
-                response = requests.post(API_URL, json={"text": text_input}, timeout=10)
+                response = requests.post(API_URL, json={"text": text_input}, timeout=10, verify=False)
 
                 if response.status_code == 200:
                     result = response.json()
@@ -154,13 +132,52 @@ if st.button("Analyser le sentiment", type="primary"):
                     # Add explanation
                     st.markdown("<p class='info-text'>Les pourcentages représentent la probabilité que le texte exprime un sentiment positif ou négatif.</p>", unsafe_allow_html=True)
 
+                    # Store prediction ID in session state
+                    st.session_state.prediction_id = result.get('prediction_id')
+
+                    # Add Accept/Reject buttons
+                    st.markdown("### Êtes-vous d'accord avec cette prédiction?")
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        if st.button("✅ Accepter", type="primary"):
+                            with st.spinner("Envoi de votre décision (accept)..."):
+                                try:
+                                    response = requests.post(
+                                        DECISION_URL, 
+                                        json={"prediction_id": st.session_state.prediction_id, "decision": "accept"},
+                                        timeout=10,
+                                        verify=False
+                                    )
+                                    if response.status_code == 200:
+                                        result = response.json()
+                                        st.success(f"Merci pour votre retour ! {result.get('message', '')}")
+                                    else:
+                                        st.error(f"Erreur lors de l'envoi de votre décision (Code: {response.status_code})")
+                                except requests.exceptions.RequestException as e:
+                                    st.error(f"Erreur de connexion à l'API: {str(e)}")
+
+                    with col2:
+                        if st.button("❌ Rejeter", type="secondary"):
+                            with st.spinner("Envoi de votre décision (reject)..."):
+                                try:
+                                    response = requests.post(
+                                        DECISION_URL, 
+                                        json={"prediction_id": st.session_state.prediction_id, "decision": "reject"},
+                                        timeout=10,
+                                        verify=False
+                                    )
+                                    if response.status_code == 200:
+                                        result = response.json()
+                                        st.success(f"Merci pour votre retour ! {result.get('message', '')}")
+                                    else:
+                                        st.error(f"Erreur lors de l'envoi de votre décision (Code: {response.status_code})")
+                                except requests.exceptions.RequestException as e:
+                                    st.error(f"Erreur de connexion à l'API: {str(e)}")
+
                 else:
                     st.error(f"Erreur lors de la prédiction (Code: {response.status_code}). Veuillez réessayer.")
 
             except requests.exceptions.RequestException as e:
                 st.error(f"Erreur de connexion à l'API: {str(e)}")
                 st.info("Vérifiez que le backend est démarré et accessible.")
-
-# Footer
-st.markdown("---")
-st.markdown("<p class='info-text'>Développé avec Streamlit et Flask</p>", unsafe_allow_html=True)

@@ -1,7 +1,9 @@
 import os
+import time
 from dotenv import load_dotenv  # pip install python-dotenv
 import smtplib
 import joblib
+import uuid
 from email.mime.text import MIMEText
 
 # Chargement des variables d'environnement
@@ -43,6 +45,9 @@ class SentimentPredictor:
         # Compteur d'échecs consécutifs
         self.consecutive_failures = 0
 
+        # Stockage des prédictions récentes pour les décisions accept/reject
+        self.recent_predictions = {}
+
     def preprocess(self, text):
         return self.vectorizer.transform([text])
 
@@ -51,9 +56,22 @@ class SentimentPredictor:
         probabilities = self.model.predict_proba(processed)[0]
         prediction = self.model.predict(processed)[0]
 
+        # Generate a unique ID for this prediction
+        prediction_id = str(uuid.uuid4())
+
+        # Store prediction data
+        self.recent_predictions[prediction_id] = {
+            "text": text,
+            "prediction": prediction,
+            "probabilities": probabilities,
+            "timestamp": time.time()
+        }
+
         # Vérification de l'exactitude seulement si true_label est fourni
         if true_label is not None:
             is_correct = prediction == true_label
+            self.recent_predictions[prediction_id]["true_label"] = true_label
+            self.recent_predictions[prediction_id]["is_correct"] = is_correct
 
             # Gestion des échecs consécutifs
             if not is_correct:
@@ -64,16 +82,54 @@ class SentimentPredictor:
             else:
                 self.consecutive_failures = 0
 
-        return {
+        result = {
             "negative": float(probabilities[0]),
-            "positive": float(probabilities[1])
+            "positive": float(probabilities[1]),
+            "prediction_id": prediction_id
         }
 
-    def send_alert_email(self):
+        return result
+
+    def handle_decision(self, prediction_id, decision):
+        """
+        Handle user's accept/reject decision for a prediction
+
+        Args:
+            prediction_id (str): The unique ID of the prediction
+            decision (str): Either 'accept' or 'reject'
+
+        Returns:
+            dict: Status of the operation
+        """
+        if prediction_id not in self.recent_predictions:
+            return {"status": "error", "message": "Prediction ID not found"}
+
+        prediction_data = self.recent_predictions[prediction_id]
+        prediction_data["user_decision"] = decision
+
+        if decision == "reject":
+            self.consecutive_failures += 1
+            print(f"Rejection received. Échec consécutif : {self.consecutive_failures}")
+
+            if self.consecutive_failures >= 3:
+                self.send_alert_email(is_rejection=True)
+        else:  # decision == "accept"
+            self.consecutive_failures = 0
+
+        return {"status": "success", "message": f"Decision '{decision}' recorded"}
+
+    def send_alert_email(self, is_rejection=False):
         try:
-            # Création du message
-            msg = MIMEText("ALERTE : 3 prédictions incorrectes consécutives détectées !")
-            msg['Subject'] = 'ALERTE MODELE'
+            # Création du message selon le type d'alerte
+            if is_rejection:
+                message_text = "ALERTE : 3 prédictions rejetées consécutivement par les utilisateurs !"
+                subject = 'ALERTE MODELE - Rejets Utilisateurs'
+            else:
+                message_text = "ALERTE : 3 prédictions incorrectes consécutives détectées !"
+                subject = 'ALERTE MODELE - Prédictions Incorrectes'
+
+            msg = MIMEText(message_text)
+            msg['Subject'] = subject
             msg['From'] = self.email_from
             msg['To'] = self.email_to
 
@@ -82,6 +138,8 @@ class SentimentPredictor:
                 server.starttls()
                 server.login(self.email_from, self.email_password)
                 server.sendmail(self.email_from, [self.email_to], msg.as_string())
+
+            print(f"Email d'alerte envoyé: {subject}")
 
         except Exception as e:
             print(f"Erreur lors de l'envoi de l'email : {str(e)}")

@@ -88,6 +88,65 @@ def predict():
             'details': str(e)
         }), 500
 
+# Decision endpoint for accept/reject
+@app.route('/decision', methods=['POST'])
+def decision():
+    start_time = time.time()
+
+    try:
+        # Get and validate request data
+        data = request.get_json()
+        if not data:
+            logger.warning("No JSON data in request")
+            return jsonify({'error': 'Aucune donnée JSON fournie'}), 400
+
+        if 'prediction_id' not in data:
+            logger.warning("No 'prediction_id' field in request data")
+            return jsonify({'error': 'Champ "prediction_id" manquant'}), 400
+
+        if 'decision' not in data:
+            logger.warning("No 'decision' field in request data")
+            return jsonify({'error': 'Champ "decision" manquant'}), 400
+
+        prediction_id = data['prediction_id']
+        decision = data['decision']
+
+        # Validate decision value
+        if decision not in ['accept', 'reject']:
+            logger.warning(f"Invalid decision value: {decision}")
+            return jsonify({'error': 'Valeur de décision invalide. Utilisez "accept" ou "reject"'}), 400
+
+        # Log request
+        logger.info(f"Processing decision request: prediction_id={prediction_id}, decision={decision}")
+
+        # Handle decision
+        result = predictor.handle_decision(prediction_id, decision)
+
+        # Calculate processing time
+        processing_time = time.time() - start_time
+        logger.info(f"Decision processed in {processing_time:.4f} seconds")
+
+        # Add metadata to response
+        response_data = {
+            **result,
+            'metadata': {
+                'processing_time_ms': round(processing_time * 1000),
+                'timestamp': time.time()
+            }
+        }
+
+        return jsonify(response_data)
+
+    except Exception as e:
+        # Log the full exception with traceback
+        logger.error(f"Error processing decision: {str(e)}")
+        logger.error(traceback.format_exc())
+
+        return jsonify({
+            'error': 'Une erreur est survenue lors du traitement de la décision',
+            'details': str(e)
+        }), 500
+
 # Error handlers
 @app.errorhandler(404)
 def not_found(e):
