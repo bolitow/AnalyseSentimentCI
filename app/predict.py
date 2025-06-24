@@ -8,6 +8,8 @@ import uuid
 from email.mime.text import MIMEText
 from datetime import datetime
 
+from app.azure_monitor import AzureMonitor
+
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,6 +20,9 @@ load_dotenv()
 
 class SentimentPredictor:
     def __init__(self):
+        # Initialiser Azure Monitor
+        self.azure_monitor = AzureMonitor()
+
         # Chargement des modèles
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -63,35 +68,62 @@ class SentimentPredictor:
         return self.vectorizer.transform([text])
 
     def predict(self, text, true_label=None):
-        processed = self.preprocess(text)
-        probabilities = self.model.predict_proba(processed)[0]
-        prediction = self.model.predict(processed)[0]
+        start_time = time.time()
 
-        # Generate a unique ID for this prediction
-        prediction_id = str(uuid.uuid4())
+        try:
+            processed = self.preprocess(text)
+            probabilities = self.model.predict_proba(processed)[0]
+            prediction = self.model.predict(processed)[0]
 
-        # Store prediction data
-        self.recent_predictions[prediction_id] = {
-            "text": text[:100] + "..." if len(text) > 100 else text,  # Truncate for storage
-            "prediction": prediction,
-            "probabilities": probabilities,
-            "timestamp": time.time()
-        }
+            # Generate a unique ID for this prediction
+            prediction_id = str(uuid.uuid4())
 
-        # Clean old predictions (older than 1 hour)
-        current_time = time.time()
-        self.recent_predictions = {
-            pid: data for pid, data in self.recent_predictions.items()
-            if current_time - data["timestamp"] < 3600
-        }
+            # Store prediction data
+            prediction_data = {
+                "text": text,
+                "prediction": prediction,
+                "probabilities": probabilities,
+                "positive": float(probabilities[1]),
+                "negative": float(probabilities[0]),
+                "timestamp": time.time()
+            }
+            self.recent_predictions[prediction_id] = prediction_data
 
-        result = {
-            "negative": float(probabilities[0]),
-            "positive": float(probabilities[1]),
-            "prediction_id": prediction_id
-        }
+            # Log to Azure Monitor
+            self.azure_monitor.log_prediction(text, prediction_data, prediction_id)
 
-        return result
+            # Log performance
+            duration_ms = (time.time() - start_time) * 1000
+            self.azure_monitor.log_performance(
+                'prediction',
+                duration_ms,
+                prediction_id=prediction_id,
+                text_length=len(text)
+            )
+
+            # Clean old predictions (older than 1 hour)
+            current_time = time.time()
+            self.recent_predictions = {
+                pid: data for pid, data in self.recent_predictions.items()
+                if current_time - data["timestamp"] < 3600
+            }
+
+            result = {
+                "negative": float(probabilities[0]),
+                "positive": float(probabilities[1]),
+                "prediction_id": prediction_id
+            }
+
+            return result
+
+        except Exception as e:
+            # Log error to Azure Monitor
+            self.azure_monitor.log_error(
+                f"Prediction error: {str(e)}",
+                error_type='prediction_error',
+                text_length=len(text) if text else 0
+            )
+            raise
 
     def handle_decision(self, prediction_id, decision):
         """
@@ -101,12 +133,23 @@ class SentimentPredictor:
 
         if prediction_id not in self.recent_predictions:
             logger.warning(f"Prediction ID {prediction_id} not found in recent predictions")
+            self.azure_monitor.log_error(
+                f"Prediction ID not found: {prediction_id}",
+                error_type='missing_prediction_id'
+            )
             return {"status": "error", "message": "Prediction ID not found"}
 
         prediction_data = self.recent_predictions[prediction_id]
         prediction_data["user_decision"] = decision
 
         if decision == "reject":
+            # Log rejection to Azure Monitor
+            self.azure_monitor.log_rejection(
+                prediction_data["text"],
+                prediction_data,
+                prediction_id
+            )
+
             self.consecutive_failures += 1
             self.rejection_history.append({
                 "prediction_id": prediction_id,
@@ -141,6 +184,13 @@ class SentimentPredictor:
             logger.error("Email configuration incomplete. Cannot send alert.")
             logger.error(
                 f"From: {bool(self.email_from)}, To: {bool(self.email_to)}, Password: {bool(self.email_password)}")
+
+            # Log to Azure Monitor instead
+            self.azure_monitor.log_error(
+                "Email alert failed - configuration incomplete",
+                error_type='email_config_error',
+                is_rejection=is_rejection
+            )
             return
 
         try:
@@ -187,9 +237,19 @@ Date : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
         except smtplib.SMTPAuthenticationError as e:
             logger.error(f"SMTP Authentication failed: {str(e)}")
-            logger.error("Please check your email and app password configuration")
+            self.azure_monitor.log_error(
+                f"Email alert failed - SMTP auth error: {str(e)}",
+                error_type='smtp_auth_error'
+            )
         except smtplib.SMTPException as e:
             logger.error(f"SMTP error occurred: {str(e)}")
+            self.azure_monitor.log_error(
+                f"Email alert failed - SMTP error: {str(e)}",
+                error_type='smtp_error'
+            )
         except Exception as e:
             logger.error(f"Unexpected error sending email: {str(e)}")
-            logger.exception("Full traceback:")
+            self.azure_monitor.log_error(
+                f"Email alert failed - unexpected error: {str(e)}",
+                error_type='email_unexpected_error'
+            )

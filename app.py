@@ -7,8 +7,10 @@ import traceback
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from opencensus.ext.flask.flask_middleware import FlaskMiddleware
 
 from app.predict import SentimentPredictor
+from app.azure_monitor import AzureMonitor
 
 # Configure logging
 logging.basicConfig(
@@ -27,16 +29,31 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
-# Initialize predictor
+# Initialize Azure Application Insights for Flask
+connection_string = os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING')
+if connection_string:
+    middleware = FlaskMiddleware(
+        app,
+        connection_string=connection_string
+    )
+    logger.info("Azure Application Insights middleware initialized")
+else:
+    logger.warning("Azure Application Insights connection string not found")
+
+# Initialize predictor and Azure Monitor
 predictor = SentimentPredictor()
+azure_monitor = AzureMonitor()
+
 
 # Health check endpoint
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
         'status': 'ok',
-        'version': os.getenv('APP_VERSION', '1.0.0')
+        'version': os.getenv('APP_VERSION', '1.0.0'),
+        'monitoring': 'enabled' if azure_monitor.enabled else 'disabled'
     })
+
 
 # Prediction endpoint
 @app.route('/predict', methods=['POST'])
@@ -83,10 +100,18 @@ def predict():
         logger.error(f"Error processing request: {str(e)}")
         logger.error(traceback.format_exc())
 
+        # Log to Azure Monitor
+        azure_monitor.log_error(
+            f"Prediction API error: {str(e)}",
+            error_type='api_error',
+            endpoint='/predict'
+        )
+
         return jsonify({
             'error': 'Une erreur est survenue lors du traitement de la demande',
             'details': str(e)
         }), 500
+
 
 # Decision endpoint for accept/reject
 @app.route('/decision', methods=['POST'])
@@ -142,13 +167,18 @@ def decision():
         logger.error(f"Error processing decision: {str(e)}")
         logger.error(traceback.format_exc())
 
+        # Log to Azure Monitor
+        azure_monitor.log_error(
+            f"Decision API error: {str(e)}",
+            error_type='api_error',
+            endpoint='/decision'
+        )
+
         return jsonify({
             'error': 'Une erreur est survenue lors du traitement de la décision',
             'details': str(e)
         }), 500
 
-
-# Ajoutez cet endpoint dans votre app.py après les autres endpoints
 
 # Test email endpoint
 @app.route('/test-email', methods=['GET'])
@@ -191,18 +221,35 @@ def test_email():
         }), 500
 
 
+# Azure Monitor status endpoint
+@app.route('/monitoring-status', methods=['GET'])
+def monitoring_status():
+    """Endpoint pour vérifier le statut d'Azure Monitor"""
+    return jsonify({
+        'azure_monitor_enabled': azure_monitor.enabled,
+        'connection_string_configured': bool(os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING')),
+        'timestamp': time.time()
+    })
+
+
 # Error handlers
 @app.errorhandler(404)
 def not_found(e):
+    azure_monitor.log_error(f"404 error: {request.url}", error_type='404_error')
     return jsonify({'error': 'Endpoint non trouvé'}), 404
+
 
 @app.errorhandler(405)
 def method_not_allowed(e):
+    azure_monitor.log_error(f"405 error: {request.method} {request.url}", error_type='405_error')
     return jsonify({'error': 'Méthode non autorisée'}), 405
+
 
 @app.errorhandler(500)
 def server_error(e):
+    azure_monitor.log_error(f"500 error: {str(e)}", error_type='500_error')
     return jsonify({'error': 'Erreur interne du serveur'}), 500
+
 
 if __name__ == '__main__':
     # Get port from environment variable or use default
@@ -210,6 +257,7 @@ if __name__ == '__main__':
 
     # Log startup information
     logger.info(f"Starting API server on port {port}")
+    logger.info(f"Azure Monitor enabled: {azure_monitor.enabled}")
 
     # Run the app
     app.run(
