@@ -7,7 +7,13 @@ Flask~=3.1.0
 flask-cors~=4.0.0
 python-dotenv~=1.1.0
 streamlit~=1.44.0
+
+# Azure Monitor et dépendances
 azure-monitor-opentelemetry==1.6.0
-opentelemetry-api
-opentelemetry-sdk
-opentelemetry-instrumentation-flask
+azure-monitor-opentelemetry-exporter==1.0.0b21
+opentelemetry-api==1.21.0
+opentelemetry-sdk==1.21.0
+opentelemetry-instrumentation-flask==0.42b0
+opentelemetry-instrumentation==0.42b0
+opentelemetry-semantic-conventions==0.42b0
+azure-core==1.29.5
