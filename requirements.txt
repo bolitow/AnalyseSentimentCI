@@ -9,4 +9,4 @@ python-dotenv~=1.1.0
 streamlit~=1.44.0
 
 # Azure Monitor OpenTelemetry avec versions compatibles
-azure-monitor-opentelemetry==1.6.1
+azure-monitor-opentelemetry==1.6.10
